@@ -323,7 +323,8 @@ fn write_pid_file(tmp_path: &Path) -> Result<(), ShadowError> {
     };
 
     let pid = rustix::process::getpid();
-    write!(file, "{pid}").map_err(|e| {
+    // NUL-terminated, the form upstream's tools write.
+    write!(file, "{pid}\0").map_err(|e| {
         ShadowError::Lock(format!("cannot write {}: {e}", tmp_path.display()).into())
     })?;
 
@@ -343,7 +344,8 @@ fn is_stale_lock(lock_path: &Path) -> bool {
         return false;
     };
 
-    let Ok(pid) = contents.trim().parse::<i32>() else {
+    // `trim` keeps the NUL that upstream's tools write after the PID.
+    let Ok(pid) = contents.trim_end_matches('\0').trim().parse::<i32>() else {
         // Cannot parse PID — treat as stale.
         return true;
     };
@@ -541,9 +543,25 @@ mod tests {
 
         let lock = FileLock::acquire(&file).unwrap();
         let contents = fs::read_to_string(&lock.lock_path).unwrap();
-        let pid: i32 = contents.trim().parse().unwrap();
-        assert_eq!(pid, i32::try_from(std::process::id()).unwrap());
+        assert_eq!(contents, format!("{}\0", std::process::id()));
 
         lock.release().unwrap();
+    }
+
+    #[test]
+    fn test_nul_terminated_pid_of_live_process_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test_file");
+        fs::write(&file, "data").unwrap();
+
+        let lock_path = dir.path().join("test_file.lock");
+        fs::write(&lock_path, format!("{}\0", std::process::id())).unwrap();
+
+        let result = FileLock::acquire_with_timeout(&file, Duration::from_millis(200));
+        assert!(
+            result.is_err(),
+            "a lock naming a live PID must not be taken over"
+        );
+        assert!(lock_path.exists(), "a held lock must not be removed");
     }
 }
